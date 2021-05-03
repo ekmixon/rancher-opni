@@ -93,8 +93,6 @@ async def train_and_inference(nw, incoming_logs_to_train_queue, fail_keywords_st
         df = pd.DataFrame(inferencing_results)
 
         update_counts = df["update_type"].value_counts().to_dict()
-        # logging.info("update_counts")
-        # logging.info(update_counts)
 
         if "cluster_created" in update_counts:
             num_clusters_created_tracking_queue.appendleft(
