@@ -67,8 +67,10 @@ async def mask_logs(nw, loop, queue):
         if not nw.nc.is_connected:
             await nw.connect(loop)
             nw.add_signal_handler(loop)
-        window_start_time_ns = payload_data_df["window_start_time_ns"].unique()
         payload_data_df["log"] = payload_data_df["log"].str.strip()
+        payload_data_df = payload_data_df[
+            payload_data_df["log"].str.count(r"[a-zA-Z0-9 ]") > 0
+        ]
         masked_logs = []
         for index, row in payload_data_df.iterrows():
             masked_logs.append(masker.mask(row["log"]))

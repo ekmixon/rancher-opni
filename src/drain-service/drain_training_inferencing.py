@@ -1,10 +1,14 @@
 # Standard Library
 import asyncio
+import json
 import logging
+import math
 import os
+import time
 from collections import deque
 
 # Third Party
+import numpy as np
 import pandas as pd
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
@@ -113,6 +117,7 @@ async def train_and_inference(nw, incoming_logs_to_train_queue, fail_keywords_st
             fail_keywords_str = "a^"
         df.loc[
             (df["drain_matched_template_support"] <= 10)
+            & (df["drain_matched_template_support"] != 10)
             | (df["matched_template"].str.contains(fail_keywords_str, regex=True)),
             "drain_prediction",
         ] = 1
@@ -219,30 +224,82 @@ async def update_es_logs(queue):
         logging.info("Updated {} logs in ES".format(len(df)))
 
 
-async def training_signal_check():
+async def training_signal_check(nw):
+    def weighted_avg_and_std(values, weights):
+        average = np.average(values, weights=weights)
+        # Fast and numerically precise:
+        variance = np.average((values - average) ** 2, weights=weights)
+        return average, math.sqrt(variance)
+
+    iteration = 0
+    train_on_next_chance = True
+    stable = False
+    training_start_ts_ns = time.time_ns()
+    training_end_ts_ns = -1.0
+    very_first_ts_ns = training_start_ts_ns
+    previous_weighted_vol = -1.0
+
+    normal_periods = []
+
     while True:
-        await asyncio.sleep(60)
-        logging.info(
-            "training_signal_check: num_clusters_created_tracking_queue {}".format(
-                num_clusters_created_tracking_queue
-            )
-        )
-        logging.info(
-            "training_signal_check: num_templates_changed_tracking_queue {}".format(
-                num_templates_changed_tracking_queue
-            )
-        )
-        logging.info(
-            "training_signal_check: num_no_templates_change_tracking_queue {}".format(
-                num_no_templates_change_tracking_queue
-            )
-        )
+        await asyncio.sleep(20)
+        iteration += 1
         num_total_clusters_tracking_queue.appendleft(len(template_miner.drain.clusters))
         logging.info(
             "training_signal_check: num_total_clusters_tracking_queue {}".format(
                 num_total_clusters_tracking_queue
             )
         )
+        num_clusters = np.array(num_total_clusters_tracking_queue)
+        vol = np.std(num_clusters) / np.mean(num_clusters[:10])
+        time_steps = num_clusters.shape[0]
+        weights = np.flip(np.true_divide(np.arange(1, time_steps + 1), time_steps))
+        weighted_mean, weighted_std = weighted_avg_and_std(num_clusters, weights)
+        weighted_vol = weighted_std / np.mean(num_clusters[:10])
+        logging.info(
+            "ITERATION {}: vol= {} weighted_vol= {} normal_periods={}".format(
+                iteration, vol, weighted_vol, str(normal_periods)
+            )
+        )
+
+        if len(num_total_clusters_tracking_queue) > 3:
+            if weighted_vol >= 0.199:
+                train_on_next_chance = True
+
+            if (
+                weighted_vol < 0.199
+                and training_start_ts_ns != very_first_ts_ns
+                and train_on_next_chance
+            ):
+                training_start_ts_ns = time.time_ns()
+
+            if weighted_vol > 0.155 and not train_on_next_chance and stable:
+                training_end_ts_ns = time.time_ns()
+                normal_periods.append(
+                    {"start_ts": training_start_ts_ns, "end_ts": training_end_ts_ns}
+                )
+                stable = False
+                training_start_ts_ns = -1.0
+
+            if weighted_vol <= 0.15 and train_on_next_chance:
+                logging.info("SENDING TRAIN SIGNAL on iteration {}".format(iteration))
+                if training_start_ts_ns != -1.0:
+                    training_end_ts_ns = time.time_ns()
+                    normal_periods.append(
+                        {"start_ts": training_start_ts_ns, "end_ts": training_end_ts_ns}
+                    )
+                # TODO send NATS signal
+                train_payload = {
+                    "model_to_train": "nulog",
+                    "time_intervals": normal_periods,
+                }
+                await nw.publish("train", json.dumps(train_payload).encode())
+                train_on_next_chance = False
+                stable = True
+
+                training_start_ts_ns = time.time_ns()
+
+        previous_weighted_vol = weighted_vol
 
 
 if __name__ == "__main__":
@@ -270,7 +327,7 @@ if __name__ == "__main__":
         nw, incoming_logs_to_train_queue, fail_keywords_str
     )
     update_es_coroutine = update_es_logs(logs_to_update_in_elasticsearch)
-    training_signal_coroutine = training_signal_check()
+    training_signal_coroutine = training_signal_check(nw)
 
     loop.run_until_complete(
         asyncio.gather(
