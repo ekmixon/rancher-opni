@@ -13,10 +13,16 @@ from elasticsearch.helpers import BulkIndexError, async_streaming_bulk
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
 
 
-pretrained_model_script_source = 'ctx._source.anomaly_level = ctx._source.anomaly_predicted_count != 0 ? "Anomaly" : "Normal";'
-workload_script_source = 'ctx._source.anomaly_level = ctx._source.anomaly_predicted_count == 0 ? "Normal" : ctx._source.anomaly_predicted_count == 1 ? "Suspicious" : "Anomaly";'
-pretrained_model_script_source += "ctx._source.opnilog_confidence = params['opnilog_score'];"
-workload_script_source += "ctx._source.opnilog_confidence = params['opnilog_score'];"
+pretrained_model_script_source = (
+    'ctx._source.anomaly_level = ctx._source.anomaly_predicted_count != 0 ? "Anomaly" : "Normal";'
+    + "ctx._source.opnilog_confidence = params['opnilog_score'];"
+)
+
+workload_script_source = (
+    'ctx._source.anomaly_level = ctx._source.anomaly_predicted_count == 0 ? "Normal" : ctx._source.anomaly_predicted_count == 1 ? "Suspicious" : "Anomaly";'
+    + "ctx._source.opnilog_confidence = params['opnilog_score'];"
+)
+
 script_for_anomaly = (
     "ctx._source.anomaly_predicted_count += 1; ctx._source.opnilog_anomaly = true;"
 )
@@ -32,7 +38,7 @@ async def doc_generator(df):
         doc_dict["doc"] = {}
         doc_dict_keys = list(doc_dict.keys())
         for k in doc_dict_keys:
-            if not k in main_doc_keywords:
+            if k not in main_doc_keywords:
                 doc_dict["doc"][k] = doc_dict[k]
                 del doc_dict[k]
         yield doc_dict
@@ -90,22 +96,14 @@ async def update_logs(es, df):
                           "opnilog":  ["_id", "masked_log", "anomaly_level", "opnilog_confidence", "inference_model"]}
     anomaly_level_options = ["Normal", "Anomaly"]
     pretrained_model_logs_df = df.loc[(df["log_type"] != "workload")]
-    for model_name in model_keywords_dict:
+    for model_name, value in model_keywords_dict.items():
         model_df = pretrained_model_logs_df[pretrained_model_logs_df["inference_model"] == model_name]
         for anomaly_level in anomaly_level_options:
             anomaly_level_df = model_df[model_df["anomaly_level"] == anomaly_level]
             if len(anomaly_level_df) == 0:
                 continue
             try:
-                async for ok, result in async_streaming_bulk(
-                        es,
-                        doc_generator(
-                            anomaly_level_df[model_keywords_dict[model_name]]
-                        ),
-                        max_retries=1,
-                        initial_backoff=1,
-                        request_timeout=5,
-                ):
+                async for ok, result in async_streaming_bulk(es, doc_generator(anomaly_level_df[value]), max_retries=1, initial_backoff=1, request_timeout=5):
                     action, result = result.popitem()
                     if not ok:
                         logging.error("failed to {} document {}".format())
