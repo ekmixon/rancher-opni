@@ -78,7 +78,7 @@ require (
 	github.com/pulumi/pulumi-random/sdk/v4 v4.7.0
 	github.com/pulumi/pulumi/sdk/v3 v3.35.0
 	github.com/rancher/charts-build-scripts v0.0.0-00010101000000-000000000000
-	github.com/samber/lo v1.21.0
+	github.com/samber/lo v1.38.1
 	github.com/spf13/cobra v1.5.0
 	github.com/spf13/pflag v1.0.5
 	github.com/tidwall/gjson v1.12.1
